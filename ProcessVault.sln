@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProcessVault.Core", "src\ProcessVault.Core\ProcessVault.Core.csproj", "{CE8DD12A-12D8-4F8D-984A-EA2E27A30C64}"
+EndProject
+Project("{60DC8134-EBA5-43B8-BCC9-BB4BC16C2548}") = "ProcessVault.Desktop", "src\ProcessVault.Desktop\ProcessVault.Desktop.csproj", "{3DC02832-EF1B-49E7-A7A7-C9582B3DF024}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProcessVault.Tests", "tests\ProcessVault.Tests\ProcessVault.Tests.csproj", "{82B28EE2-3EAE-4CD2-98BF-5231F652802C}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CE8DD12A-12D8-4F8D-984A-EA2E27A30C64}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CE8DD12A-12D8-4F8D-984A-EA2E27A30C64}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CE8DD12A-12D8-4F8D-984A-EA2E27A30C64}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CE8DD12A-12D8-4F8D-984A-EA2E27A30C64}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3DC02832-EF1B-49E7-A7A7-C9582B3DF024}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3DC02832-EF1B-49E7-A7A7-C9582B3DF024}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3DC02832-EF1B-49E7-A7A7-C9582B3DF024}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3DC02832-EF1B-49E7-A7A7-C9582B3DF024}.Release|Any CPU.Build.0 = Release|Any CPU
+		{82B28EE2-3EAE-4CD2-98BF-5231F652802C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{82B28EE2-3EAE-4CD2-98BF-5231F652802C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{82B28EE2-3EAE-4CD2-98BF-5231F652802C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{82B28EE2-3EAE-4CD2-98BF-5231F652802C}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
