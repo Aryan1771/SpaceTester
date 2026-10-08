@@ -1,5 +1,7 @@
 # ProcessVault
 
+> Repository name: `SpaceTester`. The application and solution are named ProcessVault.
+
 ProcessVault is a small Windows desktop panel for launching a user-selected program, opening a user-entered website, and observing host process activity. It is a local testing utility, **not a sandbox**. Programs run with the current Windows account's permissions. Websites open in the default browser with its normal profile, cookies, extensions, and network access. Do not use ProcessVault to run malware or software you do not trust.
 
 ## Features
@@ -29,6 +31,8 @@ dotnet publish fixtures/HarmlessProbe -c Release -r win-x64 --self-contained fal
 ```
 
 Select `fixtures/HarmlessProbe/bin/Release/net8.0/win-x64/publish/HarmlessProbe.exe`, confirm the host-execution warning, and review its output and child PID in the activity pane. The fixture writes one marker in `%LOCALAPPDATA%\ProcessVaultFixture\<run-id>`. Remove the fixture directory after inspecting it.
+
+See [the threat model](docs/THREAT_MODEL.md) for execution boundaries and residual risks.
 
 ## Architecture and trust model
 
