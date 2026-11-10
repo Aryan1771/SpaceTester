@@ -31,7 +31,7 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(_data);
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
-        Add("ready", "ProcessVault ready. Program launches and website browsing occur directly on this host.");
+        Add("ready", "ProcessVault ready. Program execution uses Windows Sandbox when the optional feature is available.");
         _ = RefreshAsync();
     }
 
@@ -45,14 +45,6 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(ProgramPathBox.Text)) { Warn("Choose a program first."); return; }
         _pending = Pending.Program;
-        Warning.Visibility = Visibility.Visible;
-    }
-
-    private void Website_Click(object sender, RoutedEventArgs e)
-    {
-        try { _ = LaunchValidation.ValidateWebAddress(WebsiteBox.Text); }
-        catch (Exception ex) { Warn(ex.Message); return; }
-        _pending = Pending.Website;
         Warning.Visibility = Visibility.Visible;
     }
 
@@ -75,12 +67,7 @@ public partial class MainWindow : Window
                 SessionTarget.Text = _runner.ToReport().TargetName;
                 HashText.Text = $"SHA-256  {_runner.ToReport().Sha256}";
             }
-            else
-            {
-                _runner.OpenWebsite(WebsiteBox.Text);
-                SessionTarget.Text = _runner.ToReport().TargetName;
-                HashText.Text = "Executable hash not applicable to a website.";
-            }
+            else throw new InvalidOperationException("Choose a program first.");
             RenderRunner();
         }
         catch (Exception ex) { Warn(ex.Message); Add("error", $"Launch failed: {ex.Message}"); }
@@ -132,7 +119,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "None - host execution", Report = _runner.ToReport(), Limitations = new[] { "The target was not isolated.", "System-wide file and network changes are not monitored.", "Process inventory may omit details without elevated permissions.", "Website activity occurs in the user's current browser profile." } };
+            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows Sandbox disposable guest", Report = _runner.ToReport(), Limitations = new[] { "ProcessVault does not observe guest filesystem, registry, child process, or resource activity.", "The process inventory lists host processes only.", "Only the selected executable is staged; adjacent dependencies are not included.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." } };
             await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
             Add("report", $"JSON report exported as {Path.GetFileName(dialog.FileName)}.");
         }
@@ -214,7 +201,7 @@ public partial class MainWindow : Window
         await Task.CompletedTask;
     }
 
-    private enum Pending { None, Program, Website }
+    private enum Pending { None, Program }
     public sealed record EventRow(string Time, string Type, string Message);
     public sealed class ProcessRow
     {

@@ -1,12 +1,6 @@
 using ProcessVault.Core;
 using System.Diagnostics;
 
-if (args.Contains("--pv-probe", StringComparer.Ordinal))
-{
-    Console.WriteLine("ProcessVault benign launch probe.");
-    return 3;
-}
-
 var failures = new List<string>();
 void Check(bool condition, string name) { if (condition) Console.WriteLine($"PASS {name}"); else { failures.Add(name); Console.WriteLine($"FAIL {name}"); } }
 void Throws<T>(Action action, string name) where T : Exception { try { action(); failures.Add(name); Console.WriteLine($"FAIL {name}"); } catch (T) { Console.WriteLine($"PASS {name}"); } }
@@ -27,17 +21,6 @@ var inventory = ProcessInventory.Read();
 Check(inventory.Any(p => p.ProcessId == Environment.ProcessId), "process inventory includes current test process");
 Check(inventory.All(p => p.MemoryBytes >= 0 && p.CpuTime >= TimeSpan.Zero), "process metrics are non-negative");
 Check(LaunchValidation.RedactAddress(new Uri("https://example.org/private?token=secret")).Equals("https://example.org"), "website report omits path and query credentials");
-
-using (var runner = new HostTestRunner())
-{
-    var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    runner.StateChanged += () => { if (runner.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) finished.TrySetResult(true); };
-    await runner.LaunchProgramAsync(Environment.ProcessPath!, "--pv-probe");
-    await finished.Task.WaitAsync(TimeSpan.FromSeconds(10));
-    await Task.Delay(150);
-    Check(runner.ToReport().State == "Exited (code 3)", "launched process exit status is observed");
-    Check(runner.ToReport().Events.Any(e => e.Type == "stdout" && e.Message.Contains("benign launch probe", StringComparison.Ordinal)), "launched process output is captured");
-}
 
 if (failures.Count != 0) { Console.Error.WriteLine($"{failures.Count} test(s) failed."); return 1; }
 Console.WriteLine("All ProcessVault tests passed.");
