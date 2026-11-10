@@ -1,18 +1,12 @@
 # ProcessVault
 
-ProcessVault is a Windows desktop launcher for running a selected executable or opening a website in a disposable **Windows Sandbox** guest. Program guests have networking disabled. Website guests enable networking so public pages can load, and open Microsoft Edge in InPrivate mode. Both disable clipboard sharing, GPU, audio, video, and printer redirection and discard guest state when closed.
+ProcessVault is a free, open-source cybersecurity PBL that demonstrates **lightweight Windows app isolation**. It starts a selected Windows program or Microsoft Edge as a low-integrity Windows AppContainer process, assigns it a unique temporary profile, and groups its child processes in a cleanup job. Programs receive no network capability. Website sessions receive the `internetClient` capability only; the private-network capability is not granted. The project uses Windows AppContainer APIs directly; it does not use Windows Sandbox, a VM, or a hypervisor.
 
-ProcessVault is a convenience front end to Microsoft's Windows Sandbox, not a custom hypervisor or antivirus. It does not determine whether a file is malicious or observe guest file, registry, process, or network activity. No software sandbox can guarantee protection against every vulnerability or escape.
-
-## Requirements
-
-- Windows 10 version 1903 or later, or Windows 11, on a supported edition: Pro, Enterprise, Education, or Pro Education/SE. Windows Home is not supported by Windows Sandbox.
-- Windows Sandbox optional feature enabled, hardware virtualization enabled, and adequate memory and disk. Windows may require a restart after enabling the feature.
-- 64-bit Windows and .NET 8 SDK to build the application.
-
-Enable **Windows Sandbox** in *Turn Windows features on or off*, then restart. Microsoft documents edition and hardware prerequisites in [Windows Sandbox overview](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview) and [installation instructions](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-install).
+This is an educational project and a defense-in-depth demonstration. It is not a secure boundary for serious malware, kernel exploits, or sensitive production systems. Windows still supplies the AppContainer enforcement primitives. A custom UI or source code does not make a new security boundary stronger by itself.
 
 ## Build and run
+
+Requirements: Windows 10/11 and .NET 8 SDK. No administrator privileges, Windows Sandbox optional feature, QEMU, or guest OS image is required. Microsoft Edge is needed for website sessions.
 
 ```powershell
 dotnet build ProcessVault.sln
@@ -20,31 +14,59 @@ dotnet run --project src/ProcessVault.Desktop
 dotnet run --project tests/ProcessVault.Tests
 ```
 
-Choose an `.exe`, optionally enter its Windows-style arguments, and select **Run program** to launch it in the offline guest. To browse, enter a complete HTTP or HTTPS address and choose **Open site in Sandbox**. Review the warning and confirm. This starts Edge inside a separate, temporary guest with no host browser profile, cookies, clipboard, or mapped personal files. It does not open the site in your host browser. Close the guest window when finished; ProcessVault will also ask whether to close an active guest when you exit.
+The test command exercises a harmless process and the included child-process/file-write fixture under AppContainer. To also smoke-test Edge launch and cleanup against `https://example.org`, run:
 
-The browser guest has network access. The website necessarily receives the requests your browser makes and any form data, credentials, or files you submit. A network-enabled Sandbox may also reach internal network services; this app does not add a network proxy, URL allowlist, or private-network firewall. Avoid signing into personal accounts or entering sensitive information, and use only sites you intend to contact. InPrivate mode prevents reuse of a persistent browser profile; it does not hide traffic from the site, network operator, or host network.
+```powershell
+$env:PROCESSVAULT_BROWSER_SMOKE = "1"
+dotnet run --project tests/ProcessVault.Tests
+Remove-Item Env:PROCESSVAULT_BROWSER_SMOKE
+```
 
-Program guests receive a read-only staging directory containing a copy of the executable and generated launch script. The executable's SHA-256 is calculated from the staged copy. Website guests receive a separate read-only folder containing only the generated browser launch script. ProcessVault's process table shows host processes only; guest page activity, browser traffic, process output, and resource usage are not collected.
+### Run a program
 
-The selected executable is staged by itself. Programs that require adjacent DLLs, data files, installers, or other dependencies may fail to start. This version does not provide a writable result export channel. Use a purpose-built disposable VM for applications that need dependencies, persistent results, controlled network policy, or deeper inspection.
+1. Choose a `.exe`, enter optional Windows command-line arguments, and click **Isolate program**.
+2. Review the warning and launch. ProcessVault copies the executable and common same-name runtime sidecars into the new AppContainer's local profile.
+3. The program runs with no network capability. Its writable AppContainer profile is deleted after its process tree exits or you click **Stop isolated process**.
 
-## Isolation behavior
+Managed programs that need additional dependency DLLs may not run because this version stages only the executable and common same-name sidecars. The app does not copy the entire source directory.
 
-- Windows Sandbox supplies the VM-backed guest environment. ProcessVault does not emulate or implement that boundary itself.
-- Program guests disable networking; website guests enable networking. Clipboard redirection remains disabled in both. GPU, audio input, video input, and printer redirection are disabled; Protected Client mode is enabled. Guest memory is set to 4 GB.
-- Only the staged executable and generated script are mapped into the guest, read-only. No host browser profile, cookies, clipboard, or user files are mapped.
-- Guest changes are discarded when the Sandbox closes. The host staging folder is removed after the Sandbox launcher exits; cleanup may need manual attention if Windows Sandbox crashes.
-- **Close Sandbox** asks Windows to close the Sandbox launcher window. If Windows does not confirm closure, close the guest window directly. The host process table cannot verify guest shutdown.
+### Open a website
 
-These settings reduce exposure but do not prove a sample is harmless. Sandbox implementation flaws, vulnerabilities in Windows or hypervisor components, and policy restrictions remain possible. For high-risk malware analysis, use a dedicated, fully patched machine or professionally managed analysis environment with no sensitive accounts or network access.
+1. Enter a complete HTTP or HTTPS address and click **Isolate website**.
+2. Review and accept the notice. ProcessVault starts Edge with an InPrivate, no-sync profile inside a new AppContainer.
+3. Edge receives the `internetClient` capability for outbound internet access. The app does not grant `privateNetworkClientServer` or server-listening capabilities. The site still receives ordinary browser requests and anything you submit. Do not use sensitive accounts or data on untrusted sites.
+4. Close the Edge window or use **Stop isolated process** to stop the contained process tree and remove its profile.
 
-## Other features
+AppContainer network isolation is enforced by Windows Filtering Platform. Network classifications, firewall policy, VPNs, and Windows version can affect connectivity. ProcessVault does not monitor traffic, provide anonymity, or prove that every internal destination is unreachable.
 
-The process explorer lists host process metadata and supports read-only observation. It cannot see processes inside the guest. JSON reports and local history contain host-observed events only. They are not forensic records or malware verdicts.
+## What the isolation does
 
-## Development
+- The child process is created with an AppContainer security token and low integrity.
+- A per-session AppContainer profile provides temporary writable storage. The selected executable is copied into that profile.
+- Program sessions receive no AppContainer capabilities. Website sessions receive `internetClient` only.
+- A Windows Job Object groups descendant processes, caps the tree at 64 processes and 2 GB of committed memory, and terminates it when ProcessVault closes the job.
+- The browser is launched with a separate user data directory, InPrivate mode, and sync disabled.
 
-Projects are organized under `src/ProcessVault.Core`, `src/ProcessVault.Desktop`, and `tests/ProcessVault.Tests`. `fixtures/HarmlessProbe` is a harmless process behavior sample, not a threat or containment test.
+Windows documents that AppContainer access combines the normal user/group permissions with the AppContainer package SID and capability SIDs. See [Launch an AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer), [AppContainer isolation](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation), and [network capability behavior](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/hh831418%28v%3Dws.11%29).
+
+## Limitations and intended use
+
+- This is process isolation inside the same Windows kernel, not a virtual machine. A kernel vulnerability or unsupported application behavior may cross the intended boundary.
+- AppContainer is not a full filesystem overlay. Reads depend on Windows ACLs and AppContainer rules; only writes granted by Windows are contained. Do not run samples that need assurance of host confidentiality or integrity.
+- Some desktop programs and browsers may refuse to run or may have reduced functionality in an AppContainer. Microsoft Edge installation and Windows policy can affect browser launch.
+- The app does not monitor file, registry, browser, or network activity and does not assign a malware verdict.
+- CPU is observed but not capped. The Job Object applies process-count and memory ceilings as well as process-tree cleanup.
+- Reports and local history are mutable local observations, not forensic evidence.
+- If ProcessVault crashes, the job handle closes and stops contained processes, but the per-session profile may remain under `%LOCALAPPDATA%\Packages` for manual cleanup.
+
+Use this for a supervised class demonstration of process isolation and capability-based networking. For serious malware, use a patched disposable VM or managed analysis environment.
+
+## Project layout
+
+- `src/ProcessVault.Core`: AppContainer process creation, argument validation, process inventory, and reports.
+- `src/ProcessVault.Desktop`: WPF interface.
+- `tests/ProcessVault.Tests`: validation and harmless isolation checks.
+- `fixtures/HarmlessProbe`: benign process and file-write demonstration.
 
 ## License
 

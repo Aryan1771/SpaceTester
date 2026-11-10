@@ -17,7 +17,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly Dictionary<int, (TimeSpan Cpu, DateTime At)> _previous = [];
     private readonly List<ProcessRow> _all = [];
-    private HostTestRunner? _runner;
+    private AppContainerRunner? _runner;
     private ProcessRow? _selected;
     private Pending _pending;
     private DateTime _lastSample = DateTime.MinValue;
@@ -31,7 +31,7 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(_data);
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
-        Add("ready", "ProcessVault ready. Program execution uses Windows Sandbox when the optional feature is available.");
+        Add("ready", "ProcessVault ready. Programs run with per-process AppContainer restrictions.");
         _ = RefreshAsync();
     }
 
@@ -45,8 +45,8 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(ProgramPathBox.Text)) { Warn("Choose a program first."); return; }
         _pending = Pending.Program;
-        WarningTitle.Text = "Launch program in Windows Sandbox";
-        WarningBody.Text = "The selected executable runs in a disposable guest with networking, clipboard, audio, video, printers, and GPU disabled. Only its staged copy is shared read-only. ProcessVault cannot observe guest activity. Windows Sandbox must be enabled.";
+        WarningTitle.Text = "Run program in an isolated app container";
+        WarningBody.Text = "This educational isolation mode launches the program with a low-integrity AppContainer token and no network capability. It receives a per-run writable profile that ProcessVault removes after the process tree exits. This is not a VM and is not designed to contain serious malware or kernel exploits.";
         ConfirmButton.Content = "Launch program";
         Warning.Visibility = Visibility.Visible;
     }
@@ -56,8 +56,8 @@ public partial class MainWindow : Window
         try { _ = LaunchValidation.ValidateWebAddress(WebsiteBox.Text); }
         catch (Exception ex) { Warn(ex.Message); return; }
         _pending = Pending.Website;
-        WarningTitle.Text = "Open website in Windows Sandbox";
-        WarningBody.Text = "This opens Microsoft Edge InPrivate in a disposable guest. Networking is enabled so the site can load. The site can receive the address and data you submit, and network-enabled guest apps may reach internal network services. Your host browser profile, cookies, clipboard, and files are not shared. Do not enter sensitive information.";
+        WarningTitle.Text = "Open site in an isolated browser process";
+        WarningBody.Text = "This starts Microsoft Edge in a low-integrity AppContainer with the internetClient capability only; the private-network capability is not granted. The website receives ordinary browser requests and any information you submit. This is an educational process sandbox, not a VM. Avoid sensitive accounts and data.";
         ConfirmButton.Content = "Open website";
         Warning.Visibility = Visibility.Visible;
     }
@@ -67,7 +67,7 @@ public partial class MainWindow : Window
         Warning.Visibility = Visibility.Collapsed;
         if (_runner?.IsRunning == true)
         {
-            Warn("Stop the current launched program before starting another test. This keeps process monitoring attached to the correct target.");
+            Warn("Stop the current isolated process tree before starting another session.");
             _pending = Pending.None;
             return;
         }
@@ -94,9 +94,9 @@ public partial class MainWindow : Window
         _pending = Pending.None;
     }
 
-    private HostTestRunner NewRunner()
+    private AppContainerRunner NewRunner()
     {
-        var runner = new HostTestRunner();
+        var runner = new AppContainerRunner();
         runner.EventAdded += evt => Dispatcher.Invoke(() => Add(evt.Type, $"{evt.Evidence}: {evt.Message}"));
         runner.StateChanged += () => Dispatcher.Invoke(RenderRunner);
         return runner;
@@ -140,9 +140,9 @@ public partial class MainWindow : Window
         try
         {
             var limitations = _runner.ToReport().Kind == "Website"
-                ? new[] { "Website receives network requests and any data submitted to it.", "The network-enabled guest may be able to reach internal network services.", "ProcessVault does not observe guest activity or browser traffic.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." }
-                : new[] { "ProcessVault does not observe guest filesystem, registry, child process, or resource activity.", "The process inventory lists host processes only.", "Only the selected executable is staged; adjacent dependencies are not included.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." };
-            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows Sandbox disposable guest", Report = _runner.ToReport(), Limitations = limitations };
+                ? new[] { "Website receives network requests and any data submitted to it.", "Only internetClient capability is granted; privateNetworkClientServer is not added.", "ProcessVault does not observe browser traffic or page behavior.", "AppContainer is process isolation, not a VM boundary." }
+                : new[] { "ProcessVault does not observe filesystem or registry activity inside the AppContainer.", "The process inventory lists host processes only.", "Only the executable and common same-name runtime sidecars are staged.", "AppContainer is process isolation, not a VM boundary." };
+            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows AppContainer process isolation", Report = _runner.ToReport(), Limitations = limitations };
             await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
             Add("report", $"JSON report exported as {Path.GetFileName(dialog.FileName)}.");
         }
@@ -170,7 +170,7 @@ public partial class MainWindow : Window
         ProcessCount.Text = $"{rows.Length:N0} host processes   Refreshed {now:HH:mm:ss}";
         RefreshSelected();
         if (_runner?.ProcessId is int pidNow && rows.FirstOrDefault(r => r.ProcessId == pidNow) is { } monitored)
-            SessionState.Text = $"{_runner.ToReport().State}   |   Sandbox host launcher: {monitored.CpuLabel} CPU, {monitored.MemoryLabel} RAM";
+            SessionState.Text = $"{_runner.ToReport().State}   |   isolated process: {monitored.CpuLabel} CPU, {monitored.MemoryLabel} RAM";
     }
 
     private void ApplyFilter()
@@ -199,7 +199,7 @@ public partial class MainWindow : Window
     {
         if (_runner is null) return;
         SessionState.Text = _runner.ToReport().State;
-        if (_runner.ProcessId is int pid) SessionTarget.Text = $"{_runner.ToReport().TargetName} (Sandbox host PID {pid})";
+        if (_runner.ProcessId is int pid) SessionTarget.Text = $"{_runner.ToReport().TargetName} (isolated PID {pid})";
     }
 
     private void Add(string type, string message)
@@ -216,9 +216,9 @@ public partial class MainWindow : Window
         _timer.Stop();
         if (_runner?.IsRunning == true && _runner.ToReport().Kind is "Program" or "Website")
         {
-            var answer = System.Windows.MessageBox.Show("A Windows Sandbox session is still open. Close the Sandbox before exiting ProcessVault?", "Sandbox still running", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
-            if (answer == MessageBoxResult.Cancel) { e.Cancel = true; _timer.Start(); return; }
-            if (answer == MessageBoxResult.Yes) _runner.Stop();
+            var answer = System.Windows.MessageBox.Show("Closing ProcessVault will stop this isolated process tree. Continue?", "Process still running", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (answer == MessageBoxResult.No) { e.Cancel = true; _timer.Start(); return; }
+            _runner.Stop();
         }
         ArchiveRunner();
         await Task.CompletedTask;

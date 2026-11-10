@@ -11,7 +11,7 @@ var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Loca
 Directory.CreateDirectory(root);
 var marker = Path.Combine(root, "fixture-event.txt");
 await File.WriteAllTextAsync(marker, $"Harmless ProcessVault demonstration. Created {DateTimeOffset.UtcNow:O}. PID {Environment.ProcessId}.\n");
-Console.WriteLine($"Created a harmless marker under this user's LocalAppData: {marker}");
+Console.WriteLine($"Created a harmless marker under the current LocalAppData: {marker}");
 
 var self = Environment.ProcessPath ?? throw new InvalidOperationException("Could not resolve fixture executable.");
 var childInfo = new ProcessStartInfo(self) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -20,6 +20,6 @@ using var child = Process.Start(childInfo) ?? throw new InvalidOperationExceptio
 var childOutput = await child.StandardOutput.ReadToEndAsync();
 await child.WaitForExitAsync();
 Console.Write(childOutput);
-Console.WriteLine($"Child exited with code {child.ExitCode}. This process and file are on the host, not isolated.");
-Console.WriteLine("The fixture changes only its unique ProcessVaultFixture directory; remove that directory after your demonstration.");
+Console.WriteLine($"Child exited with code {child.ExitCode}. The process and file use the current execution context.");
+Console.WriteLine("When launched by ProcessVault, AppContainer policy applies and its temporary profile is removed after the process tree exits.");
 return 0;
