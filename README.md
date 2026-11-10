@@ -24,9 +24,10 @@ Remove-Item Env:PROCESSVAULT_BROWSER_SMOKE
 
 ### Run a program
 
-1. Choose a `.exe`, enter optional Windows command-line arguments, and click **Isolate program**.
-2. Review the warning and launch. ProcessVault copies the executable and common same-name runtime sidecars into the new AppContainer's local profile.
-3. The program runs with no network capability. Its writable AppContainer profile is deleted after its process tree exits or you click **Stop isolated process**.
+1. Drag one `.exe` into the ProcessVault window, or choose **File → Open…** (also `Ctrl+O`). You can also use **Browse** beside the program path.
+2. Enter optional Windows command-line arguments and click **Isolate program**. Dropping a file or choosing File → Open fills the program field and shows the launch confirmation.
+3. Review the warning and launch. ProcessVault copies the executable and common same-name runtime sidecars into the new AppContainer's local profile.
+4. The program runs with no network capability. Its writable AppContainer profile is deleted after its process tree exits or you click **Stop isolated process**.
 
 Managed programs that need additional dependency DLLs may not run because this version stages only the executable and common same-name sidecars. The app does not copy the entire source directory.
 

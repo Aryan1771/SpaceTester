@@ -41,6 +41,49 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true) ProgramPathBox.Text = Path.GetFullPath(dialog.FileName);
     }
 
+    private void Open_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "Open a program to isolate", Filter = "Windows applications (*.exe)|*.exe|All files (*.*)|*.*", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != true) return;
+        ProgramPathBox.Text = Path.GetFullPath(dialog.FileName);
+        Run_Click(sender, e);
+    }
+
+    private void Window_DragEnter(object sender, DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void Window_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] { Length: 1 } files)
+        {
+            Warn("Drop one application executable (.exe) at a time.");
+            return;
+        }
+        var path = files[0];
+        if (!File.Exists(path) || !Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            Warn("Drop a Windows application executable (.exe). Shortcuts and folders are not supported yet.");
+            return;
+        }
+        ProgramPathBox.Text = Path.GetFullPath(path);
+        Run_Click(sender, e);
+    }
+
+    private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.O &&
+            (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0)
+        {
+            Open_Click(sender, e);
+            e.Handled = true;
+        }
+    }
+
+    private void Exit_Click(object sender, RoutedEventArgs e) => Close();
+
     private void Run_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(ProgramPathBox.Text)) { Warn("Choose a program first."); return; }
