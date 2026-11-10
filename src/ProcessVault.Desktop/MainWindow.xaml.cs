@@ -31,7 +31,7 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(_data);
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
-        Add("ready", "ProcessVault ready. Programs run with per-process AppContainer restrictions.");
+        Add("ready", "Space Tester ready. Programs run with per-process AppContainer restrictions.");
         _ = RefreshAsync();
     }
 
@@ -89,7 +89,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(ProgramPathBox.Text)) { Warn("Choose a program first."); return; }
         _pending = Pending.Program;
         WarningTitle.Text = "Run program in an isolated app container";
-        WarningBody.Text = "This educational isolation mode launches the program with a low-integrity AppContainer token and no network capability. It receives a per-run writable profile that ProcessVault removes after the process tree exits. This is not a VM and is not designed to contain serious malware or kernel exploits.";
+        WarningBody.Text = "This educational isolation mode launches the program with a low-integrity AppContainer token and no network capability. It receives a per-run writable profile that Space Tester removes after the process tree exits. This is not a VM and is not designed to contain serious malware or kernel exploits.";
         ConfirmButton.Content = "Launch program";
         Warning.Visibility = Visibility.Visible;
     }
@@ -183,8 +183,8 @@ public partial class MainWindow : Window
         try
         {
             var limitations = _runner.ToReport().Kind == "Website"
-                ? new[] { "Website receives network requests and any data submitted to it.", "Only internetClient capability is granted; privateNetworkClientServer is not added.", "ProcessVault does not observe browser traffic or page behavior.", "AppContainer is process isolation, not a VM boundary." }
-                : new[] { "ProcessVault does not observe filesystem or registry activity inside the AppContainer.", "The process inventory lists host processes only.", "Only the executable and common same-name runtime sidecars are staged.", "AppContainer is process isolation, not a VM boundary." };
+                ? new[] { "Website receives network requests and any data submitted to it.", "Only internetClient capability is granted; privateNetworkClientServer is not added.", "Space Tester does not observe browser traffic or page behavior.", "AppContainer is process isolation, not a VM boundary." }
+                : new[] { "Space Tester does not observe filesystem or registry activity inside the AppContainer.", "The process inventory lists host processes only.", "Only the executable and common same-name runtime sidecars are staged.", "AppContainer is process isolation, not a VM boundary." };
             var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows AppContainer process isolation", Report = _runner.ToReport(), Limitations = limitations };
             await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
             Add("report", $"JSON report exported as {Path.GetFileName(dialog.FileName)}.");
@@ -252,14 +252,14 @@ public partial class MainWindow : Window
         EventCount.Text = $"{Events.Count} events  |  host-observed";
     }
 
-    private static void Warn(string message) => System.Windows.MessageBox.Show(message, "ProcessVault", MessageBoxButton.OK, MessageBoxImage.Warning);
+    private static void Warn(string message) => System.Windows.MessageBox.Show(message, "Space Tester", MessageBoxButton.OK, MessageBoxImage.Warning);
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         _timer.Stop();
         if (_runner?.IsRunning == true && _runner.ToReport().Kind is "Program" or "Website")
         {
-            var answer = System.Windows.MessageBox.Show("Closing ProcessVault will stop this isolated process tree. Continue?", "Process still running", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            var answer = System.Windows.MessageBox.Show("Closing Space Tester will stop this isolated process tree. Continue?", "Process still running", MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (answer == MessageBoxResult.No) { e.Cancel = true; _timer.Start(); return; }
             _runner.Stop();
         }
