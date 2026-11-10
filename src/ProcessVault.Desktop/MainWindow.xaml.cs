@@ -45,6 +45,20 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(ProgramPathBox.Text)) { Warn("Choose a program first."); return; }
         _pending = Pending.Program;
+        WarningTitle.Text = "Launch program in Windows Sandbox";
+        WarningBody.Text = "The selected executable runs in a disposable guest with networking, clipboard, audio, video, printers, and GPU disabled. Only its staged copy is shared read-only. ProcessVault cannot observe guest activity. Windows Sandbox must be enabled.";
+        ConfirmButton.Content = "Launch program";
+        Warning.Visibility = Visibility.Visible;
+    }
+
+    private void Website_Click(object sender, RoutedEventArgs e)
+    {
+        try { _ = LaunchValidation.ValidateWebAddress(WebsiteBox.Text); }
+        catch (Exception ex) { Warn(ex.Message); return; }
+        _pending = Pending.Website;
+        WarningTitle.Text = "Open website in Windows Sandbox";
+        WarningBody.Text = "This opens Microsoft Edge InPrivate in a disposable guest. Networking is enabled so the site can load. The site can receive the address and data you submit, and network-enabled guest apps may reach internal network services. Your host browser profile, cookies, clipboard, and files are not shared. Do not enter sensitive information.";
+        ConfirmButton.Content = "Open website";
         Warning.Visibility = Visibility.Visible;
     }
 
@@ -67,7 +81,13 @@ public partial class MainWindow : Window
                 SessionTarget.Text = _runner.ToReport().TargetName;
                 HashText.Text = $"SHA-256  {_runner.ToReport().Sha256}";
             }
-            else throw new InvalidOperationException("Choose a program first.");
+            else if (_pending == Pending.Website)
+            {
+                await _runner.LaunchWebsiteAsync(WebsiteBox.Text);
+                SessionTarget.Text = _runner.ToReport().TargetName;
+                HashText.Text = "Microsoft Edge InPrivate; network enabled inside guest.";
+            }
+            else throw new InvalidOperationException("Choose a program or website first.");
             RenderRunner();
         }
         catch (Exception ex) { Warn(ex.Message); Add("error", $"Launch failed: {ex.Message}"); }
@@ -119,7 +139,10 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         try
         {
-            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows Sandbox disposable guest", Report = _runner.ToReport(), Limitations = new[] { "ProcessVault does not observe guest filesystem, registry, child process, or resource activity.", "The process inventory lists host processes only.", "Only the selected executable is staged; adjacent dependencies are not included.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." } };
+            var limitations = _runner.ToReport().Kind == "Website"
+                ? new[] { "Website receives network requests and any data submitted to it.", "The network-enabled guest may be able to reach internal network services.", "ProcessVault does not observe guest activity or browser traffic.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." }
+                : new[] { "ProcessVault does not observe guest filesystem, registry, child process, or resource activity.", "The process inventory lists host processes only.", "Only the selected executable is staged; adjacent dependencies are not included.", "Sandbox isolation depends on the Windows and Hyper-V security boundary." };
+            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows Sandbox disposable guest", Report = _runner.ToReport(), Limitations = limitations };
             await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
             Add("report", $"JSON report exported as {Path.GetFileName(dialog.FileName)}.");
         }
@@ -147,7 +170,7 @@ public partial class MainWindow : Window
         ProcessCount.Text = $"{rows.Length:N0} host processes   Refreshed {now:HH:mm:ss}";
         RefreshSelected();
         if (_runner?.ProcessId is int pidNow && rows.FirstOrDefault(r => r.ProcessId == pidNow) is { } monitored)
-            SessionState.Text = $"{_runner.ToReport().State}   |   {monitored.CpuLabel} CPU   |   {monitored.MemoryLabel} RAM";
+            SessionState.Text = $"{_runner.ToReport().State}   |   Sandbox host launcher: {monitored.CpuLabel} CPU, {monitored.MemoryLabel} RAM";
     }
 
     private void ApplyFilter()
@@ -176,7 +199,7 @@ public partial class MainWindow : Window
     {
         if (_runner is null) return;
         SessionState.Text = _runner.ToReport().State;
-        if (_runner.ProcessId is int pid) SessionTarget.Text = $"{_runner.ToReport().TargetName} (PID {pid})";
+        if (_runner.ProcessId is int pid) SessionTarget.Text = $"{_runner.ToReport().TargetName} (Sandbox host PID {pid})";
     }
 
     private void Add(string type, string message)
@@ -191,9 +214,9 @@ public partial class MainWindow : Window
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         _timer.Stop();
-        if (_runner?.IsRunning == true && _runner.ToReport().Kind == "Program")
+        if (_runner?.IsRunning == true && _runner.ToReport().Kind is "Program" or "Website")
         {
-            var answer = System.Windows.MessageBox.Show("A launched program is still running. Stop it and its reachable child processes before closing?", "Program still running", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
+            var answer = System.Windows.MessageBox.Show("A Windows Sandbox session is still open. Close the Sandbox before exiting ProcessVault?", "Sandbox still running", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
             if (answer == MessageBoxResult.Cancel) { e.Cancel = true; _timer.Start(); return; }
             if (answer == MessageBoxResult.Yes) _runner.Stop();
         }
@@ -201,7 +224,7 @@ public partial class MainWindow : Window
         await Task.CompletedTask;
     }
 
-    private enum Pending { None, Program }
+    private enum Pending { None, Program, Website }
     public sealed record EventRow(string Time, string Type, string Message);
     public sealed class ProcessRow
     {

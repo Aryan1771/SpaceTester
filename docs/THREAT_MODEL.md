@@ -2,33 +2,38 @@
 
 ## Purpose and security boundary
 
-ProcessVault prepares a Windows Sandbox configuration and asks the Windows Sandbox feature to start an executable in a disposable guest. The actual isolation boundary is implemented by Windows Sandbox and its Hyper-V architecture, not by ProcessVault. The selected program is treated as untrusted.
+ProcessVault prepares Windows Sandbox configurations for a program or a website browser session. The actual VM-backed isolation boundary is implemented by Windows Sandbox and its Hyper-V architecture, not by ProcessVault. The selected program and website are treated as untrusted.
 
-## Flow and exposed host data
+## Program flow
 
-ProcessVault validates an existing `.exe`, parses the optional Windows argument line, copies the executable to a unique temporary directory, hashes the staged copy, and writes a PowerShell launch script plus a `.wsb` file. The guest maps that directory as `C:\ProcessVault` with `ReadOnly=true`. It contains only the selected executable and generated script. ProcessVault passes the `.wsb` path to `WindowsSandbox.exe`.
+ProcessVault validates an existing `.exe`, parses the optional Windows argument line, copies the executable to a unique temporary directory, hashes the staged copy, and writes a PowerShell launch script plus a `.wsb` file. The guest maps that directory as `C:\ProcessVault` with `ReadOnly=true`. Networking is disabled. Guest filesystem changes are discarded when its session closes.
 
-The configuration disables networking, clipboard redirection, vGPU, audio input, video input, and printer redirection, enables Protected Client mode, and requests 4096 MB guest memory. Windows Sandbox starts the script on guest logon. Guest filesystem changes are discarded when its session closes. ProcessVault removes the host staging directory after the Sandbox launcher exits.
+## Website flow
 
-## Assets and trust
+ProcessVault accepts only absolute HTTP or HTTPS URLs without embedded credentials. It writes a generated PowerShell script to a unique temporary directory and launches a Windows Sandbox guest with that script folder mapped read-only. The script starts Microsoft Edge with `--inprivate`, `--no-first-run`, and `--disable-sync`. No host browser profile, cookies, clipboard, or personal files are mapped. Networking is enabled so the browser can load the requested website. The guest has no persistent browser profile, and the Sandbox discards its state on close.
 
-The host OS, user data, credentials, devices, and network are sensitive. The mapped folder contains the selected executable and launch script and is shared read-only. The selected program can read its mapped contents. Its own guest output cannot be exported by this app.
+## Website privacy and network exposure
 
-## What the application does not guarantee
+Website isolation protects the host browser profile and files from ordinary guest access; it does not hide browser traffic from the destination site or network operator. The site receives the URL and normal HTTP requests and can receive data the user submits, including credentials and uploaded files. InPrivate mode is not anonymity and does not prevent a site from tracking the current session.
+
+Windows Sandbox networking may expose the guest to internal network services. This implementation does not use a controlled proxy, hostname allowlist, egress firewall, DNS pinning, or a mechanism that guarantees the guest can reach public Internet sites while being unable to reach private/LAN addresses. A malicious page may exploit the browser or attempt access to reachable services. For untrusted sites, do not sign in or enter sensitive data. For strict egress controls or malware detonation, use a dedicated analysis VM/network with explicit policy.
+
+## Shared configuration
+
+Clipboard redirection, vGPU, audio input, video input, and printer redirection are disabled. Protected Client mode is enabled and guest memory is set to 4096 MB. The staging folder is read-only and removed when the Sandbox launcher exits; a crash may leave it behind. ProcessVault cannot observe guest browser traffic, page behavior, filesystem, registry, child processes, or resource usage. Reports are host-side session metadata, not forensic evidence or a malware verdict. Closing the launcher from ProcessVault is a best-effort window close request; the user may need to close the Sandbox guest window directly.
+
+## Limitations
 
 - Windows Sandbox is not supported on Windows Home and must be installed, enabled, and operational. Group policy can restrict features or mapped folders.
 - No sandbox is guaranteed escape-proof. Windows, hypervisor, guest image, drivers, and hardware vulnerabilities remain relevant.
-- Networking disabled prevents ordinary guest network access, but no independent network monitoring is performed.
-- The app cannot observe guest stdout/stderr, filesystem or registry activity, child processes, or resource usage. The host process list does not show guest process details.
-- Only one executable is staged. Adjacent dependencies, data files, installers, and writable result export are unsupported.
-- The hash identifies the staged copy at launch, not publisher trust or safety.
-- A selected executable can still exercise any vulnerability in the guest or Sandbox boundary. The host staging directory remains present during the session and is removed on launcher exit; a crash can leave it behind.
-- ProcessVault history and exported JSON are mutable local observations, not sealed evidence.
-- Website isolation is not implemented. Website launch was removed rather than opening an untrusted page in the host's normal browser profile.
+- Only one executable is staged for program tests. Adjacent dependencies and writable result export are unsupported.
+- The website session depends on Microsoft Edge being present in the guest Windows image.
+- Networking enabled for a website session is broad; this app does not constrain destinations to public websites.
+- The process list contains host processes only. Exported JSON and local history are mutable observations.
 
 ## Safer operation
 
-Keep Windows and its virtualization components patched. Do not map folders containing sensitive data. For high-risk malware, use a dedicated disposable machine or a managed analysis environment separated from personal accounts and networks. Treat results as observations, not a malware verdict.
+Keep Windows and its virtualization components patched. Only browse to sites you intend to contact. Do not enter personal credentials or sensitive information into untrusted sites. For high-risk analysis, use a dedicated disposable machine or a managed environment with network egress controls and no personal accounts.
 
 ## References
 

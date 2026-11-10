@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -41,7 +40,7 @@ public sealed class HostTestRunner : IDisposable
             File.Copy(fullPath, stagedExecutable, overwrite: false);
             await using (var stream = File.OpenRead(stagedExecutable)) _hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, token));
             await File.WriteAllTextAsync(Path.Combine(staging, "launch.ps1"), BuildGuestScript(Path.GetFileName(fullPath), args), new UTF8Encoding(false), token);
-            var config = BuildSandboxConfig(staging);
+            var config = SandboxConfigBuilder.Build(staging, networking: false);
             var configPath = Path.Combine(staging, "ProcessVault.wsb");
             await File.WriteAllTextAsync(configPath, config, new UTF8Encoding(false), token);
             var start = new ProcessStartInfo(sandboxExe) { UseShellExecute = false };
@@ -59,6 +58,42 @@ public sealed class HostTestRunner : IDisposable
         _endedAt = null;
         _state = "Running";
         AddEvent("sandbox", $"Started Windows Sandbox for {_targetName}. Network and clipboard are disabled; the staged executable is read-only inside the guest. Guest activity is not visible to the host process table.");
+        StateChanged?.Invoke();
+    }
+
+    public async Task LaunchWebsiteAsync(string address, CancellationToken token = default)
+    {
+        if (IsRunning) throw new InvalidOperationException("Close the current Sandbox before starting another session.");
+        var uri = LaunchValidation.ValidateWebAddress(address);
+        _kind = "Website";
+        _targetName = LaunchValidation.RedactAddress(uri);
+        _hash = null;
+        var sandboxExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsSandbox.exe");
+        if (!File.Exists(sandboxExe))
+            throw new PlatformNotSupportedException("Windows Sandbox is not installed or enabled. Enable the Windows Sandbox optional feature on a supported Windows edition and restart.");
+
+        var staging = Path.Combine(Path.GetTempPath(), "ProcessVault", Id);
+        Directory.CreateDirectory(staging);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(staging, "launch.ps1"), SandboxConfigBuilder.BuildBrowserScript(uri), new UTF8Encoding(false), token);
+            var configPath = Path.Combine(staging, "ProcessVault.wsb");
+            await File.WriteAllTextAsync(configPath, SandboxConfigBuilder.Build(staging, networking: true), new UTF8Encoding(false), token);
+            var start = new ProcessStartInfo(sandboxExe) { UseShellExecute = false };
+            start.ArgumentList.Add(configPath);
+            _process = new Process { StartInfo = start, EnableRaisingEvents = true };
+            _process.Exited += (_, _) => OnExited(staging);
+            if (!_process.Start()) throw new InvalidOperationException("Windows Sandbox failed to start.");
+        }
+        catch
+        {
+            try { Directory.Delete(staging, recursive: true); } catch { }
+            throw;
+        }
+        _startedAt = DateTimeOffset.UtcNow;
+        _endedAt = null;
+        _state = "Running website in network-enabled Sandbox";
+        AddEvent("website-sandbox", $"Opened {_targetName} in a disposable InPrivate browser guest. The guest has internet/network access; the site can receive data you submit, and may be able to reach internal network services. No host browser profile or clipboard is shared.");
         StateChanged?.Invoke();
     }
 
@@ -81,17 +116,24 @@ public sealed class HostTestRunner : IDisposable
         StateChanged?.Invoke();
         try
         {
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit(5000);
-            _state = "Stopped by user";
-            AddEvent("stop", "Stopped the selected process and currently reachable child processes.");
+            var closeRequested = process.CloseMainWindow();
+            if (closeRequested && process.WaitForExit(5000))
+            {
+                _state = "Stopped by user";
+                AddEvent("stop", "Closed the Windows Sandbox launcher window.");
+            }
+            else
+            {
+                _state = "Close the Sandbox guest window manually";
+                AddEvent("stop", "Windows did not confirm that the Sandbox launcher closed. Close the Windows Sandbox guest window to end the session.");
+            }
         }
         catch (Exception ex)
         {
             _state = "Stop failed";
             AddEvent("stop-error", $"Could not stop process tree: {ex.Message}");
         }
-        _endedAt = DateTimeOffset.UtcNow;
+        if (process.HasExited) _endedAt = DateTimeOffset.UtcNow;
         StateChanged?.Invoke();
     }
 
@@ -129,19 +171,6 @@ public sealed class HostTestRunner : IDisposable
         static string Ps(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
         var argumentLine = string.Join(" ", args.Select(Quote));
         return "$ErrorActionPreference = 'Stop'\r\n$exe = 'C:\\ProcessVault\\" + executable.Replace("'", "''", StringComparison.Ordinal) + "'\r\n$psi = New-Object System.Diagnostics.ProcessStartInfo\r\n$psi.FileName = $exe\r\n$psi.Arguments = " + Ps(argumentLine) + "\r\n$psi.WorkingDirectory = 'C:\\ProcessVault'\r\n$p = [System.Diagnostics.Process]::Start($psi)\r\n$p.WaitForExit()\r\nexit $p.ExitCode\r\n";
-    }
-
-    private static string BuildSandboxConfig(string hostFolder)
-    {
-        var escaped = SecurityElement.Escape(hostFolder) ?? throw new InvalidOperationException("Could not encode the staging path.");
-        return "<Configuration>\r\n" +
-               "  <VGpu>Disable</VGpu>\r\n  <Networking>Disable</Networking>\r\n" +
-               "  <AudioInput>Disable</AudioInput>\r\n  <VideoInput>Disable</VideoInput>\r\n" +
-               "  <PrinterRedirection>Disable</PrinterRedirection>\r\n  <ClipboardRedirection>Disable</ClipboardRedirection>\r\n" +
-               "  <ProtectedClient>Enable</ProtectedClient>\r\n  <MemoryInMB>4096</MemoryInMB>\r\n" +
-               "  <MappedFolders><MappedFolder><HostFolder>" + escaped + "</HostFolder><SandboxFolder>C:\\ProcessVault</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder></MappedFolders>\r\n" +
-               "  <LogonCommand><Command>powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\ProcessVault\\launch.ps1</Command></LogonCommand>\r\n" +
-               "</Configuration>\r\n";
     }
 
     private void AddEvent(string type, string message)

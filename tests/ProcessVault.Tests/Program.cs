@@ -1,5 +1,6 @@
 using ProcessVault.Core;
 using System.Diagnostics;
+using System.Xml.Linq;
 
 var failures = new List<string>();
 void Check(bool condition, string name) { if (condition) Console.WriteLine($"PASS {name}"); else { failures.Add(name); Console.WriteLine($"FAIL {name}"); } }
@@ -21,6 +22,21 @@ var inventory = ProcessInventory.Read();
 Check(inventory.Any(p => p.ProcessId == Environment.ProcessId), "process inventory includes current test process");
 Check(inventory.All(p => p.MemoryBytes >= 0 && p.CpuTime >= TimeSpan.Zero), "process metrics are non-negative");
 Check(LaunchValidation.RedactAddress(new Uri("https://example.org/private?token=secret")).Equals("https://example.org"), "website report omits path and query credentials");
+var sandboxFolder = Path.Combine(Path.GetTempPath(), $"processvault-config-{Guid.NewGuid():N}");
+Directory.CreateDirectory(sandboxFolder);
+try
+{
+    var appConfig = XDocument.Parse(SandboxConfigBuilder.Build(sandboxFolder, networking: false));
+    var webConfig = XDocument.Parse(SandboxConfigBuilder.Build(sandboxFolder, networking: true));
+    Check(appConfig.Root?.Element("Networking")?.Value == "Disable", "program guest disables networking");
+    Check(webConfig.Root?.Element("Networking")?.Value == "Enable", "website guest enables networking");
+    Check(webConfig.Root?.Element("ClipboardRedirection")?.Value == "Disable", "website guest disables clipboard redirection");
+    Check(webConfig.Descendants("ReadOnly").SingleOrDefault()?.Value == "true", "website launcher script mapping is read-only");
+    var browserScript = SandboxConfigBuilder.BuildBrowserScript(new Uri("https://example.org/path?q=1"));
+    Check(browserScript.Contains("--inprivate", StringComparison.Ordinal) && browserScript.Contains("--disable-sync", StringComparison.Ordinal), "website guest starts Edge with a clean private session");
+    Check(browserScript.Contains("https://example.org/path?q=1", StringComparison.Ordinal), "website guest receives the validated URL");
+}
+finally { Directory.Delete(sandboxFolder, recursive: true); }
 
 if (failures.Count != 0) { Console.Error.WriteLine($"{failures.Count} test(s) failed."); return 1; }
 Console.WriteLine("All ProcessVault tests passed.");
