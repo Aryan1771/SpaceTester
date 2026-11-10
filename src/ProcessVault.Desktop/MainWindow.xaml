@@ -8,9 +8,7 @@
         AllowDrop="True" DragEnter="Window_DragEnter" Drop="Window_Drop"
         PreviewKeyDown="Window_PreviewKeyDown" Closing="Window_Closing">
     <Grid>
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                      Background="Transparent" CanContentScroll="False">
-        <Grid Margin="20" MinWidth="960">
+        <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -169,7 +167,6 @@
         </Border>
 
         </Grid>
-        </ScrollViewer>
         <Border x:Name="Warning" Background="{DynamicResource OverlayBrush}" Visibility="Collapsed">
             <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="7" Padding="24"
                     Width="480" HorizontalAlignment="Center" VerticalAlignment="Center">
