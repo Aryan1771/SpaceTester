@@ -3,17 +3,17 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-        <SolidColorBrush x:Key="InkBrush" Color="#1B292D" />
-        <SolidColorBrush x:Key="MutedBrush" Color="#68777A" />
-        <SolidColorBrush x:Key="CanvasBrush" Color="#F1F4F2" />
+        <SolidColorBrush x:Key="InkBrush" Color="#202123" />
+        <SolidColorBrush x:Key="MutedBrush" Color="#6B6F76" />
+        <SolidColorBrush x:Key="CanvasBrush" Color="#FFFFFF" />
         <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
-        <SolidColorBrush x:Key="ControlBrush" Color="#FFFFFF" />
-        <SolidColorBrush x:Key="InputBrush" Color="#FFFFFF" />
-        <SolidColorBrush x:Key="LineBrush" Color="#DCE4E0" />
-        <SolidColorBrush x:Key="GridHeaderBrush" Color="#EEF2EF" />
-        <SolidColorBrush x:Key="AlternateRowBrush" Color="#F7F9F8" />
-        <SolidColorBrush x:Key="AccentSurfaceBrush" Color="#E5F3EA" />
-        <SolidColorBrush x:Key="AccentInkBrush" Color="#24623A" />
+        <SolidColorBrush x:Key="ControlBrush" Color="#F7F7F8" />
+        <SolidColorBrush x:Key="InputBrush" Color="#F7F7F8" />
+        <SolidColorBrush x:Key="LineBrush" Color="#E5E5E6" />
+        <SolidColorBrush x:Key="GridHeaderBrush" Color="#F1F1F2" />
+        <SolidColorBrush x:Key="AlternateRowBrush" Color="#F7F7F8" />
+        <SolidColorBrush x:Key="AccentSurfaceBrush" Color="#E7F0FF" />
+        <SolidColorBrush x:Key="AccentInkBrush" Color="#2458A6" />
         <SolidColorBrush x:Key="OverlayBrush" Color="#C919272C" />
 
         <Style TargetType="TextBlock">

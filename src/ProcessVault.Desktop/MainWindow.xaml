@@ -3,11 +3,14 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Space Tester"
         Icon="pack://application:,,,/Assets/S.ico"
-        Width="1300" Height="850" MinWidth="1020" MinHeight="650"
+        Width="1300" Height="850" MinWidth="740" MinHeight="480"
         Background="{DynamicResource CanvasBrush}"
         AllowDrop="True" DragEnter="Window_DragEnter" Drop="Window_Drop"
         PreviewKeyDown="Window_PreviewKeyDown" Closing="Window_Closing">
-    <Grid Margin="20">
+    <Grid>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                      Background="Transparent" CanContentScroll="False">
+        <Grid Margin="20" MinWidth="960">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -74,7 +77,7 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="2" Margin="0,0,0,12">
+        <Grid Grid.Row="2" Margin="0,0,0,12" MinHeight="340">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="305" />
@@ -100,7 +103,9 @@
                         </StackPanel>
                     </DockPanel>
                     <DataGrid x:Name="ProcessGrid" Grid.Row="1" ItemsSource="{Binding Processes}"
-                              SelectionChanged="ProcessSelected" AlternationCount="2">
+                              SelectionChanged="ProcessSelected" AlternationCount="2" MaxHeight="360"
+                              ScrollViewer.VerticalScrollBarVisibility="Auto"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Process" Binding="{Binding Name}" Width="*" />
                             <DataGridTextColumn Header="PID" Binding="{Binding ProcessId}" Width="70" />
@@ -149,7 +154,9 @@
                     <TextBlock x:Name="EventCount" DockPanel.Dock="Right" Text="Host-observed"
                                Foreground="{DynamicResource MutedBrush}" FontSize="11" />
                 </DockPanel>
-                <ListView Grid.Row="1" ItemsSource="{Binding Events}" BorderThickness="0" FontSize="12">
+                <ListView Grid.Row="1" ItemsSource="{Binding Events}" BorderThickness="0" FontSize="12"
+                          ScrollViewer.VerticalScrollBarVisibility="Auto"
+                          ScrollViewer.HorizontalScrollBarVisibility="Auto">
                     <ListView.View>
                         <GridView>
                             <GridViewColumn Header="Time" Width="85" DisplayMemberBinding="{Binding Time}" />
@@ -161,8 +168,9 @@
             </Grid>
         </Border>
 
-        <Border x:Name="Warning" Grid.RowSpan="4" Background="{DynamicResource OverlayBrush}"
-                Visibility="Collapsed">
+        </Grid>
+        </ScrollViewer>
+        <Border x:Name="Warning" Background="{DynamicResource OverlayBrush}" Visibility="Collapsed">
             <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="7" Padding="24"
                     Width="480" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <StackPanel>
