@@ -1,8 +1,10 @@
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 
@@ -18,9 +20,11 @@ public sealed class AppContainerRunner : IDisposable
     private const uint JobObjectLimitKillOnJobClose = 0x00002000 | 0x00000200 | 0x00000008;
     private readonly List<TestEvent> _events = [];
     private readonly object _jobSync = new();
+    private readonly object _completionSync = new();
     private Process? _process;
     private SafeFileHandle? _job;
     private bool _jobTreeStopped;
+    private bool _sessionCompleted;
     private string? _profileName;
     private string _state = "Ready";
     private string _kind = "Program";
@@ -31,30 +35,88 @@ public sealed class AppContainerRunner : IDisposable
 
     public string Id { get; } = Guid.NewGuid().ToString("N");
     public int? ProcessId => _process is { HasExited: false } ? _process.Id : _process?.Id;
-    public bool IsRunning => _process is { HasExited: false };
+    public bool IsRunning => GetActiveProcessCount() > 0;
     public event Action<TestEvent>? EventAdded;
     public event Action? StateChanged;
+
+    internal int[] GetJobProcessIds()
+    {
+        lock (_jobSync)
+        {
+            if (_job is null || _job.IsInvalid || _job.IsClosed) return [];
+            const int capacity = 64;
+            var size = 8 + capacity * IntPtr.Size;
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (!QueryInformationJobObject(_job, 3, buffer, (uint)size, out _)) return [];
+                var count = Math.Min(Marshal.ReadInt32(buffer, 4), capacity);
+                var ids = new int[count];
+                for (var index = 0; index < count; index++)
+                    ids[index] = checked((int)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64());
+                return ids;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+    }
+
+    internal bool HasSandboxedBrowserChild()
+    {
+        var rootPid = ProcessId;
+        return rootPid is not null && GetJobProcessIds().Any(pid => pid != rootPid && IsSandboxedProcess(pid));
+    }
 
     public static IReadOnlyList<string> CapabilitiesFor(bool internet) => internet ? ["internetClient"] : [];
     public static string QuoteArgument(string value) => Quote(value);
 
+    [SupportedOSPlatform("windows")]
     public Task LaunchProgramAsync(string executable, string argumentLine, CancellationToken token = default)
     {
         var args = LaunchValidation.ParseWindowsArguments(argumentLine);
         return LaunchAsync(executable, args, network: false, kind: "Program", target: Path.GetFileName(executable), token);
     }
 
+    [SupportedOSPlatform("windows")]
+    internal Task LaunchNetworkProbeAsync(string executable, string argumentLine, CancellationToken token = default)
+    {
+        var args = LaunchValidation.ParseWindowsArguments(argumentLine);
+        return LaunchAsync(executable, args, network: true, kind: "Network probe", target: Path.GetFileName(executable), token);
+    }
+
+    [SupportedOSPlatform("windows")]
     public Task LaunchWebsiteAsync(string address, CancellationToken token = default)
     {
         var uri = LaunchValidation.ValidateWebAddress(address);
-        var edge = FindEdge();
-        var profileArgs = new[] { "--inprivate", "--no-first-run", "--disable-sync", "--disable-features=msEdgeSidebarV2", uri.AbsoluteUri };
+        var (browser, browserName, browserKind) = FindDefaultBrowser();
+        return LaunchWebsiteWithBrowserAsync(uri, browser, browserName, browserKind, token);
+    }
+
+    [SupportedOSPlatform("windows")]
+    public Task LaunchWebsiteWithBrowserAsync(string address, string browserExecutable, CancellationToken token = default)
+    {
+        var uri = LaunchValidation.ValidateWebAddress(address);
+        var executable = LaunchValidation.NormalizeExecutable(browserExecutable);
+        var name = Path.GetFileNameWithoutExtension(executable);
+        var kind = GetBrowserKind(name);
+        return LaunchWebsiteWithBrowserAsync(uri, executable, name, kind, token);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private Task LaunchWebsiteWithBrowserAsync(Uri uri, string browser, string browserName, BrowserKind browserKind, CancellationToken token)
+    {
         _websiteUri = uri;
-        return LaunchAsync(edge, profileArgs, network: true, kind: "Website", target: LaunchValidation.RedactAddress(uri), token);
+        _websiteName = browserName;
+        _websiteKind = browserKind;
+        return LaunchAsync(browser, [uri.AbsoluteUri], network: true, kind: "Website", target: LaunchValidation.RedactAddress(uri), token);
     }
 
     private Uri? _websiteUri;
+    private string _websiteName = "default browser";
+    private BrowserKind _websiteKind;
+    public string WebsiteBrowserName => _websiteName;
+    private enum BrowserKind { Edge, Chrome, Opera, Firefox, Chromium }
 
+    [SupportedOSPlatform("windows")]
     private async Task LaunchAsync(string executable, IReadOnlyList<string> arguments, bool network, string kind, string target, CancellationToken token)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("AppContainer isolation is available only on Windows.");
@@ -62,33 +124,54 @@ public sealed class AppContainerRunner : IDisposable
         var fullPath = LaunchValidation.NormalizeExecutable(executable);
         _kind = kind;
         _targetName = target;
+        _sessionCompleted = false;
         _hash = null;
-        var profile = CreateProfile(network);
+        var profile = CreateProfile(network && kind != "Website");
         _profileName = profile.Name;
         var work = Path.Combine(profile.LocalDataPath, "Work");
 
         try
         {
             Directory.CreateDirectory(work);
+            Directory.CreateDirectory(Path.Combine(profile.LocalDataPath, "Local"));
+            Directory.CreateDirectory(Path.Combine(profile.LocalDataPath, "Temp"));
+            Directory.CreateDirectory(Path.Combine(profile.LocalDataPath, "Roaming"));
             var staged = Path.Combine(work, Path.GetFileName(fullPath));
-            if (kind == "Program")
+            if (kind != "Website")
             {
                 File.Copy(fullPath, staged);
-                await using var stream = File.OpenRead(staged);
-                _hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, token));
+                if (kind == "Program")
+                {
+                    await using var stream = File.OpenRead(staged);
+                    _hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, token));
+                }
                 CopySidecars(fullPath, work);
             }
 
             var launchArgs = arguments.ToList();
+            string? browserProfilePath = null;
             if (kind == "Website")
             {
-                launchArgs = ["--inprivate", "--no-first-run", "--disable-sync", "--user-data-dir=" + Path.Combine(profile.LocalDataPath, "BrowserProfile"), _websiteUri!.AbsoluteUri];
+                browserProfilePath = Path.Combine(profile.LocalDataPath, "BrowserProfile");
+                Directory.CreateDirectory(browserProfilePath);
+                launchArgs = _websiteKind switch
+                {
+                    BrowserKind.Firefox => ["-no-remote", "-profile", browserProfilePath, _websiteUri!.AbsoluteUri],
+                    _ => ["--user-data-dir=" + browserProfilePath, "--no-first-run", _websiteUri!.AbsoluteUri],
+                };
             }
             var launchPath = kind == "Website" ? fullPath : staged;
             var commandLine = Quote(launchPath) + " " + string.Join(" ", launchArgs.Select(Quote));
-            using var attributes = new StartupAttributes(profile.Sid, network ? "internetClient" : null);
             _job = CreateKillOnCloseJob();
-            var created = CreateSuspendedAppContainerProcess(launchPath, commandLine, Path.GetDirectoryName(launchPath)!, attributes);
+            var workingDirectory = browserProfilePath ?? Path.GetDirectoryName(launchPath)!;
+            CreatedProcess created;
+            if (kind == "Website")
+                created = CreateSuspendedBrowserProcess(launchPath, commandLine, workingDirectory, profile.LocalDataPath);
+            else
+            {
+                using var attributes = new StartupAttributes(profile.Sid, network ? "internetClient" : null);
+                created = CreateSuspendedAppContainerProcess(launchPath, commandLine, workingDirectory, profile.LocalDataPath, attributes);
+            }
             using (created.ProcessHandle)
             using (created.ThreadHandle)
             {
@@ -108,15 +191,24 @@ public sealed class AppContainerRunner : IDisposable
         catch
         {
             var treeStopped = StopJobTree();
-            if (treeStopped && _profileName is not null) DeleteAppContainerProfile(_profileName);
-            _profileName = null;
+            if (treeStopped)
+            {
+                if (_profileName is not null) DeleteAppContainerProfile(_profileName);
+                _profileName = null;
+            }
+            else AddEvent("cleanup-warning", "Launch failed and the AppContainer process tree could not be confirmed stopped; temporary profile permissions were left in place for safety.");
             throw;
         }
 
         _startedAt = DateTimeOffset.UtcNow;
         _endedAt = null;
-        _state = network ? "Running in AppContainer (internet capability only)" : "Running in AppContainer (network disabled)";
-        AddEvent("isolation", $"Started {_targetName} in a low-integrity AppContainer. Network capability: {(network ? "internetClient" : "none")}. Writes are scoped to the temporary AppContainer profile; clipboard and host browser profile are not shared.");
+        _state = kind == "Website"
+            ? "Running with the browser's native renderer sandbox and a private profile"
+            : network ? "Running in AppContainer (internet capability only)" : "Running in AppContainer (network disabled)";
+        var isolationMessage = kind == "Website"
+            ? $"Started {_targetName} in {_websiteName} with a separate temporary browser profile and its native site-renderer sandbox. The browser controller runs as the current Windows user; website sessions do not use ProcessVault's AppContainer."
+            : $"Started {_targetName} in a low-integrity AppContainer. Network capability: {(network ? "internetClient" : "none")} .";
+        AddEvent("isolation", isolationMessage);
         StateChanged?.Invoke();
     }
 
@@ -134,18 +226,21 @@ public sealed class AppContainerRunner : IDisposable
 
     public void Stop()
     {
-        if (_process is not { HasExited: false }) return;
+        if (!IsRunning) return;
         _state = "Stopping isolated process tree";
         StateChanged?.Invoke();
         var treeStopped = StopJobTree();
-        try { _process.WaitForExit(5000); } catch { }
-        if (!_process.HasExited)
+        if (_process is { } process)
         {
-            try { _process.Kill(entireProcessTree: true); _process.WaitForExit(5000); }
-            catch (Exception ex) { AddEvent("stop-error", ex.Message); }
+            try { process.WaitForExit(5000); } catch { }
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); process.WaitForExit(5000); }
+                catch (Exception ex) { AddEvent("stop-error", ex.Message); }
+            }
         }
         _endedAt = DateTimeOffset.UtcNow;
-        _state = treeStopped ? "Stopped; temporary AppContainer profile is being removed" : "Stopped; profile cleanup deferred because process-tree exit could not be confirmed";
+        _state = treeStopped ? "Stopped; temporary session profile is being removed" : "Stopped; profile cleanup deferred because process-tree exit could not be confirmed";
         StateChanged?.Invoke();
         if (treeStopped) CleanupProfile();
     }
@@ -154,6 +249,32 @@ public sealed class AppContainerRunner : IDisposable
 
     private void OnExited()
     {
+        if (GetActiveProcessCount() > 0)
+        {
+            _state = _kind == "Website"
+            ? "Running with browser helper processes active"
+                : "Running in AppContainer (child processes active)";
+            AddEvent("launcher-exit", $"The initial process exited with code {_process?.ExitCode} while processes in its isolated job remain active; keeping the session open.");
+            StateChanged?.Invoke();
+            _ = MonitorJobUntilEmptyAsync();
+            return;
+        }
+        CompleteSession();
+    }
+
+    private async Task MonitorJobUntilEmptyAsync()
+    {
+        while (GetActiveProcessCount() > 0) await Task.Delay(500);
+        CompleteSession();
+    }
+
+    private void CompleteSession()
+    {
+        lock (_completionSync)
+        {
+            if (_sessionCompleted) return;
+            _sessionCompleted = true;
+        }
         var treeStopped = StopJobTree();
         _endedAt = DateTimeOffset.UtcNow;
         _state = treeStopped ? $"Exited (code {_process?.ExitCode}); temporary profile removed" : $"Exited (code {_process?.ExitCode}); profile cleanup deferred";
@@ -190,6 +311,62 @@ public sealed class AppContainerRunner : IDisposable
                 return _jobTreeStopped;
             }
             finally { job.Dispose(); }
+        }
+    }
+
+    private uint GetActiveProcessCount()
+    {
+        lock (_jobSync)
+        {
+            if (_job is null || _job.IsInvalid || _job.IsClosed) return 0;
+            var info = new JobObjectBasicAccountingInformation();
+            var size = (uint)Marshal.SizeOf<JobObjectBasicAccountingInformation>();
+            var pointer = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                if (!QueryInformationJobObject(_job, 1, pointer, size, out _)) return 0;
+                info = Marshal.PtrToStructure<JobObjectBasicAccountingInformation>(pointer);
+                return info.ActiveProcesses;
+            }
+            finally { Marshal.FreeHGlobal(pointer); }
+        }
+    }
+
+    private static bool IsSandboxedProcess(int processId)
+    {
+        using var process = OpenProcess(0x1000, false, (uint)processId);
+        if (process.IsInvalid) return false;
+        if (!OpenProcessToken(process, 0x0008, out var token)) return false;
+        using (token)
+        {
+            var length = 0;
+            _ = GetTokenInformation(token, 29, IntPtr.Zero, 0, out length);
+            if (length >= sizeof(int))
+            {
+                var appContainer = Marshal.AllocHGlobal(length);
+                try
+                {
+                    if (GetTokenInformation(token, 29, appContainer, length, out _) && Marshal.ReadInt32(appContainer) != 0) return true;
+                }
+                finally { Marshal.FreeHGlobal(appContainer); }
+            }
+
+            length = 0;
+            _ = GetTokenInformation(token, 25, IntPtr.Zero, 0, out length);
+            if (length < IntPtr.Size) return false;
+            var integrity = Marshal.AllocHGlobal(length);
+            try
+            {
+                if (!GetTokenInformation(token, 25, integrity, length, out _)) return false;
+                var sid = Marshal.ReadIntPtr(integrity);
+                var subAuthorityCount = GetSidSubAuthorityCount(sid);
+                if (subAuthorityCount == IntPtr.Zero) return false;
+                var count = Marshal.ReadByte(subAuthorityCount);
+                if (count == 0) return false;
+                var lastAuthority = GetSidSubAuthority(sid, (uint)(count - 1));
+                return lastAuthority != IntPtr.Zero && Marshal.ReadInt32(lastAuthority) < 0x2000;
+            }
+            finally { Marshal.FreeHGlobal(integrity); }
         }
     }
 
@@ -267,15 +444,28 @@ public sealed class AppContainerRunner : IDisposable
         LocalFree(array);
     }
 
-    private static string FindEdge()
+    private static (string Executable, string Name, BrowserKind Kind) FindDefaultBrowser()
     {
-        var candidates = new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft", "Edge", "Application", "msedge.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft", "Edge", "Application", "msedge.exe")
-        };
-        return candidates.FirstOrDefault(File.Exists) ?? throw new FileNotFoundException("Microsoft Edge was not found. Install Edge or use the program launcher with a browser executable.");
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Default browser lookup is available only on Windows.");
+        var progId = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "ProgId", null) as string;
+        if (string.IsNullOrWhiteSpace(progId)) throw new InvalidOperationException("Windows did not report a default HTTPS browser.");
+        var command = Registry.GetValue($@"HKEY_CLASSES_ROOT\{progId}\shell\open\command", null, null) as string;
+        if (string.IsNullOrWhiteSpace(command)) throw new InvalidOperationException($"Could not read the open command for {progId}.");
+        var match = System.Text.RegularExpressions.Regex.Match(command, @"^\s*""(?<path>[^""]+\.exe)""|^\s*(?<plain>[^\s]+\.exe)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var executable = match.Groups["path"].Success ? match.Groups["path"].Value : match.Groups["plain"].Value;
+        if (!match.Success || !File.Exists(executable)) throw new FileNotFoundException($"Could not locate the default browser executable for {progId}.");
+        var name = Path.GetFileNameWithoutExtension(executable);
+        return (executable, name, GetBrowserKind(name));
     }
+
+    private static BrowserKind GetBrowserKind(string name) => name.ToLowerInvariant() switch
+    {
+        var n when n.Contains("firefox") => BrowserKind.Firefox,
+        var n when n.Contains("msedge") => BrowserKind.Edge,
+        var n when n.Contains("opera") => BrowserKind.Opera,
+        var n when n.Contains("chrome") => BrowserKind.Chrome,
+        _ => BrowserKind.Chromium,
+    };
 
     private static void CopySidecars(string executable, string destination)
     {
@@ -343,14 +533,92 @@ public sealed class AppContainerRunner : IDisposable
         finally { Marshal.FreeHGlobal(ptr); }
     }
 
-    private static CreatedProcess CreateSuspendedAppContainerProcess(string executable, string commandLine, string workingDirectory, StartupAttributes attributes)
+    private static CreatedProcess CreateSuspendedAppContainerProcess(string executable, string commandLine, string workingDirectory, string localDataPath, StartupAttributes attributes)
     {
-        var startup = new StartupInfoEx { StartupInfo = new StartupInfo(), AttributeList = attributes.List };
+        var startupInfo = new StartupInfo { Flags = 0x00000001, ShowWindow = 1 };
+        var startup = new StartupInfoEx { StartupInfo = startupInfo, AttributeList = attributes.List };
         startup.StartupInfo.Size = (uint)Marshal.SizeOf<StartupInfoEx>();
         var mutable = new StringBuilder(commandLine);
-        if (!CreateProcess(executable, mutable, IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent | CreateSuspended, IntPtr.Zero, workingDirectory, ref startup, out var info))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not start the AppContainer process.");
-        return new CreatedProcess(new SafeFileHandle(info.Process, ownsHandle: true), new SafeFileHandle(info.Thread, ownsHandle: true), info.ProcessId);
+        var environment = BuildIsolatedEnvironment(localDataPath);
+        try
+        {
+            if (!CreateProcess(executable, mutable, IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent | CreateSuspended | 0x00000400, environment, workingDirectory, ref startup, out var info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not start the AppContainer process.");
+            return new CreatedProcess(new SafeFileHandle(info.Process, ownsHandle: true), new SafeFileHandle(info.Thread, ownsHandle: true), info.ProcessId);
+        }
+        finally { Marshal.FreeHGlobal(environment); }
+    }
+
+    private static CreatedProcess CreateSuspendedBrowserProcess(string executable, string commandLine, string workingDirectory, string localDataPath)
+    {
+        var startup = new StartupInfo { Size = (uint)Marshal.SizeOf<StartupInfo>(), Flags = 0x00000001, ShowWindow = 1 };
+        var mutable = new StringBuilder(commandLine);
+        var environment = BuildBrowserEnvironment(localDataPath);
+        try
+        {
+            const uint flags = CreateSuspended | 0x00000400;
+            if (!CreateStandardProcess(executable, mutable, IntPtr.Zero, IntPtr.Zero, false, flags, environment, workingDirectory, ref startup, out var info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not start the default browser in its private profile.");
+            return new CreatedProcess(new SafeFileHandle(info.Process, ownsHandle: true), new SafeFileHandle(info.Thread, ownsHandle: true), info.ProcessId);
+        }
+        finally { Marshal.FreeHGlobal(environment); }
+    }
+
+    private static IntPtr BuildIsolatedEnvironment(string localDataPath)
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ALLUSERSPROFILE", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH",
+            "NUMBER_OF_PROCESSORS", "OS", "PATH", "PATHEXT", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PUBLIC",
+            "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR"
+        };
+        var values = Environment.GetEnvironmentVariables().Keys.Cast<string>()
+            .Where(allowed.Contains)
+            .ToDictionary(key => key, key => Environment.GetEnvironmentVariable(key) ?? "", StringComparer.OrdinalIgnoreCase);
+        var hostProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var drive = Path.GetPathRoot(hostProfilePath) ?? Environment.GetEnvironmentVariable("SystemDrive") ?? "C:\\";
+        values["APPDATA"] = Path.Combine(localDataPath, "Roaming");
+        values["LOCALAPPDATA"] = localDataPath;
+        values["TEMP"] = Path.Combine(localDataPath, "Temp");
+        values["TMP"] = values["TEMP"];
+        values["USERPROFILE"] = hostProfilePath;
+        values["HOMEDRIVE"] = drive.TrimEnd('\\');
+        values["HOMEPATH"] = hostProfilePath.StartsWith(drive, StringComparison.OrdinalIgnoreCase) ? hostProfilePath[drive.Length..] : hostProfilePath;
+        var block = string.Join("\0", values.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => $"{pair.Key}={pair.Value}")) + "\0\0";
+        return Marshal.StringToHGlobalUni(block);
+    }
+
+    private static IntPtr BuildBrowserEnvironment(string localDataPath)
+    {
+        var values = Environment.GetEnvironmentVariables().Keys.Cast<string>()
+            .Where(key => key.StartsWith('=') || key.Equals("PATH", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PATHEXT", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SYSTEMROOT", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("WINDIR", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SYSTEMDRIVE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PROGRAMFILES", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PROGRAMFILES(X86)", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("COMMONPROGRAMFILES", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("COMMONPROGRAMFILES(X86)", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("COMPUTERNAME", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("USERNAME", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("USERDOMAIN", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("OS", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PROCESSOR_ARCHITECTURE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("NUMBER_OF_PROCESSORS", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(key => key, key => Environment.GetEnvironmentVariable(key) ?? "", StringComparer.OrdinalIgnoreCase);
+        values["APPDATA"] = Path.Combine(localDataPath, "Roaming");
+        values["LOCALAPPDATA"] = Path.Combine(localDataPath, "Local");
+        values["TEMP"] = Path.Combine(localDataPath, "Temp");
+        values["TMP"] = values["TEMP"];
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        values["USERPROFILE"] = userProfile;
+        var drive = Path.GetPathRoot(userProfile) ?? "C:\\";
+        values["HOMEDRIVE"] = drive.TrimEnd('\\');
+        values["HOMEPATH"] = userProfile.StartsWith(drive, StringComparison.OrdinalIgnoreCase) ? userProfile[drive.Length..] : userProfile;
+        var block = string.Join("\0", values.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => $"{pair.Key}={pair.Value}")) + "\0\0";
+        return Marshal.StringToHGlobalUni(block);
     }
 
     public void Dispose()
@@ -434,6 +702,7 @@ public sealed class AppContainerRunner : IDisposable
     [StructLayout(LayoutKind.Sequential)] private struct StartupInfoEx { public StartupInfo StartupInfo; public IntPtr AttributeList; }
     [StructLayout(LayoutKind.Sequential)] private struct ProcessInformation { public IntPtr Process, Thread; public int ProcessId, ThreadId; }
     [StructLayout(LayoutKind.Sequential)] private struct IoCounters { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }
+    [StructLayout(LayoutKind.Sequential)] private struct JobObjectBasicAccountingInformation { public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime; public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses; }
     [StructLayout(LayoutKind.Sequential)] private struct JobBasicLimitInformation { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
     [StructLayout(LayoutKind.Sequential)] private struct JobObjectExtendedLimitInformation { public JobBasicLimitInformation BasicLimitInformation; public IoCounters IoInfo; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }
 
@@ -444,15 +713,22 @@ public sealed class AppContainerRunner : IDisposable
     [DllImport("kernelbase.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool DeriveCapabilitySidsFromName(string capabilityName, out IntPtr groupSids, out int groupSidCount, out IntPtr capabilitySids, out int capabilitySidCount);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool ConvertStringSidToSid(string stringSid, out IntPtr sid);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr stringSid);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(SafeFileHandle process, uint desiredAccess, out SafeFileHandle token);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(SafeFileHandle token, int informationClass, IntPtr information, int informationLength, out int returnLength);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint subAuthorityIndex);
     [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("ole32.dll")] private static extern void CoTaskMemFree(IntPtr memory);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool InitializeProcThreadAttributeList(IntPtr attributeList, int attributeCount, int flags, ref nuint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool UpdateProcThreadAttribute(IntPtr attributeList, uint flags, uint attribute, IntPtr value, nuint size, IntPtr previousValue, IntPtr returnSize);
     [DllImport("kernel32.dll")] private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcess(string? applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string currentDirectory, ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateProcessW")] private static extern bool CreateStandardProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string currentDirectory, ref StartupInfo startupInfo, out ProcessInformation processInformation);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeFileHandle OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(SafeFileHandle thread);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeFileHandle CreateJobObject(IntPtr jobAttributes, string? name);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(SafeFileHandle job, uint infoClass, IntPtr info, uint infoLength);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool QueryInformationJobObject(SafeFileHandle job, uint infoClass, IntPtr info, uint infoLength, out uint returnLength);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(SafeFileHandle job, SafeFileHandle process);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);

@@ -100,7 +100,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { Warn(ex.Message); return; }
         _pending = Pending.Website;
         WarningTitle.Text = "Open site in an isolated browser process";
-        WarningBody.Text = "This starts Microsoft Edge in a low-integrity AppContainer with the internetClient capability only; the private-network capability is not granted. The website receives ordinary browser requests and any information you submit. This is an educational process sandbox, not a VM. Avoid sensitive accounts and data.";
+        WarningBody.Text = "This opens your Windows default browser with a separate temporary profile, the browser's native site-renderer sandbox, and process-tree cleanup. The browser itself runs as your Windows user, so it can still access files allowed to your account if the browser is compromised. This is a class demonstration, not a VM or protection for serious malware. The site receives normal requests and anything you submit.";
         ConfirmButton.Content = "Open website";
         Warning.Visibility = Visibility.Visible;
     }
@@ -128,7 +128,7 @@ public partial class MainWindow : Window
             {
                 await _runner.LaunchWebsiteAsync(WebsiteBox.Text);
                 SessionTarget.Text = _runner.ToReport().TargetName;
-                HashText.Text = "Microsoft Edge InPrivate; network enabled inside guest.";
+                HashText.Text = $"{_runner.WebsiteBrowserName} temporary profile; native browser sandbox; internet enabled.";
             }
             else throw new InvalidOperationException("Choose a program or website first.");
             RenderRunner();
@@ -183,9 +183,10 @@ public partial class MainWindow : Window
         try
         {
             var limitations = _runner.ToReport().Kind == "Website"
-                ? new[] { "Website receives network requests and any data submitted to it.", "Only internetClient capability is granted; privateNetworkClientServer is not added.", "Space Tester does not observe browser traffic or page behavior.", "AppContainer is process isolation, not a VM boundary." }
+                ? new[] { "Website sessions do not use ProcessVault AppContainer; the browser's native renderer sandbox isolates page content.", "The browser controller runs as the current Windows user and can access files allowed to that account.", "Website receives normal network requests and anything submitted; Space Tester does not monitor traffic.", "Job Object limits process count and memory and cleans up browser children; this is not a VM." }
                 : new[] { "Space Tester does not observe filesystem or registry activity inside the AppContainer.", "The process inventory lists host processes only.", "Only the executable and common same-name runtime sidecars are staged.", "AppContainer is process isolation, not a VM boundary." };
-            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = "Windows AppContainer process isolation", Report = _runner.ToReport(), Limitations = limitations };
+            var isolation = _runner.ToReport().Kind == "Website" ? "Browser native renderer sandbox, separate temporary profile, and Windows Job Object" : "Windows AppContainer process isolation";
+            var export = new { ExportedAt = DateTimeOffset.UtcNow, Platform = Environment.OSVersion.ToString(), Isolation = isolation, Report = _runner.ToReport(), Limitations = limitations };
             await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
             Add("report", $"JSON report exported as {Path.GetFileName(dialog.FileName)}.");
         }
@@ -243,6 +244,14 @@ public partial class MainWindow : Window
         if (_runner is null) return;
         SessionState.Text = _runner.ToReport().State;
         if (_runner.ProcessId is int pid) SessionTarget.Text = $"{_runner.ToReport().TargetName} (isolated PID {pid})";
+        var active = _runner.IsRunning;
+        LaunchPanel.BorderBrush = active
+            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(82, 156, 255))
+            : (System.Windows.Media.Brush)FindResource("LineBrush");
+        LaunchPanel.BorderThickness = new Thickness(active ? 2 : 1);
+        LaunchPanel.Effect = active
+            ? new System.Windows.Media.Effects.DropShadowEffect { Color = System.Windows.Media.Color.FromRgb(55, 137, 255), BlurRadius = 20, ShadowDepth = 0, Opacity = 0.65 }
+            : null;
     }
 
     private void Add(string type, string message)

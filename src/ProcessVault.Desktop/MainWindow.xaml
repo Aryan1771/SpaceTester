@@ -35,12 +35,12 @@
             </StackPanel>
             <Border Grid.Column="1" Background="{DynamicResource AccentSurfaceBrush}"
                     CornerRadius="4" Padding="11,7" VerticalAlignment="Center">
-                <TextBlock Text="APPCONTAINER ISOLATION" FontSize="11" FontWeight="Bold"
+                <TextBlock Text="PROGRAM APPCONTAINER · BROWSER NATIVE SANDBOX" FontSize="11" FontWeight="Bold"
                            Foreground="{DynamicResource AccentInkBrush}" />
             </Border>
         </Grid>
 
-        <Border Grid.Row="1" Background="{DynamicResource SurfaceBrush}"
+        <Border x:Name="LaunchPanel" Grid.Row="1" Background="{DynamicResource SurfaceBrush}"
                 BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
                 CornerRadius="6" Padding="12" Margin="0,0,0,12">
             <Grid>
@@ -64,7 +64,7 @@
                     <TextBlock Text="Website (HTTP or HTTPS)" FontSize="11"
                                Foreground="{DynamicResource MutedBrush}" />
                     <TextBox x:Name="WebsiteBox" Text="https://" Padding="8" />
-                    <TextBlock Text="Edge runs with internet access, without your normal browser profile."
+                    <TextBlock Text="Your default browser uses its site sandbox and a separate temporary profile."
                                FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
                 </StackPanel>
                 <StackPanel Grid.Column="2" VerticalAlignment="Bottom">

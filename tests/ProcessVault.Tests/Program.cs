@@ -1,5 +1,6 @@
 using ProcessVault.Core;
 using System.Diagnostics;
+using System.Text;
 
 if (args.Contains("--pv-appcontainer-probe", StringComparer.Ordinal)) return 0;
 
@@ -24,7 +25,7 @@ Check(inventory.Any(p => p.ProcessId == Environment.ProcessId), "process invento
 Check(inventory.All(p => p.MemoryBytes >= 0 && p.CpuTime >= TimeSpan.Zero), "process metrics are non-negative");
 Check(LaunchValidation.RedactAddress(new Uri("https://example.org/private?token=secret")).Equals("https://example.org"), "website report omits path and query credentials");
 Check(AppContainerRunner.CapabilitiesFor(internet: false).Count == 0, "program app container receives no capabilities");
-Check(AppContainerRunner.CapabilitiesFor(internet: true).SequenceEqual(["internetClient"]), "website app container receives only internetClient capability");
+Check(AppContainerRunner.CapabilitiesFor(internet: true).SequenceEqual(["internetClient"]), "network-enabled AppContainer probe receives only internetClient capability");
 Check(AppContainerRunner.QuoteArgument("two words") == "\"two words\"", "AppContainer launch quotes arguments with spaces");
 
 if (OperatingSystem.IsWindows())
@@ -51,21 +52,100 @@ if (OperatingSystem.IsWindows())
             await harmlessDone.Task.WaitAsync(TimeSpan.FromSeconds(20));
             Check(harmless.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "harmless fixture can write to its AppContainer profile and run a child");
             Check(!harmless.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "fixture AppContainer profile is removed after exit");
+
+            using var networkProbe = new AppContainerRunner();
+            var probeDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            networkProbe.StateChanged += () => { if (networkProbe.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) probeDone.TrySetResult(true); };
+            await networkProbe.LaunchNetworkProbeAsync(fixture, "--probe-network");
+            await probeDone.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            Check(networkProbe.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "internetClient AppContainer can fetch https://example.org");
+            Check(networkProbe.ToReport().Events.Any(e => e.Type == "isolation" && e.Message.Contains("internetClient", StringComparison.Ordinal)), "network probe receives internetClient capability");
+            Check(!networkProbe.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "network probe AppContainer profile is removed after exit");
+
+            var hostFile = Path.Combine(Path.GetTempPath(), $"processvault-host-probe-{Guid.NewGuid():N}.txt");
+            const string hostContents = "host file must remain unchanged";
+            await File.WriteAllTextAsync(hostFile, hostContents);
+            try
+            {
+                using var hostProbe = new AppContainerRunner();
+                var hostProbeDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                hostProbe.StateChanged += () => { if (hostProbe.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) hostProbeDone.TrySetResult(true); };
+                await hostProbe.LaunchProgramAsync(fixture, $"--probe-host-access {AppContainerRunner.QuoteArgument(hostFile)}");
+                await hostProbeDone.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                Check(hostProbe.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "AppContainer cannot read or write a host temp file");
+                Check(await File.ReadAllTextAsync(hostFile) == hostContents, "host file remains unchanged after the isolation probe");
+                Check(!hostProbe.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "host access probe AppContainer profile is removed after exit");
+            }
+            finally { File.Delete(hostFile); }
         }
     }
 
     if (Environment.GetEnvironmentVariable("PROCESSVAULT_BROWSER_SMOKE") == "1")
     {
         using var browser = new AppContainerRunner();
-        await browser.LaunchWebsiteAsync("https://example.org");
-        await Task.Delay(TimeSpan.FromSeconds(3));
-        Check(browser.IsRunning, "Edge starts inside the internetClient AppContainer");
+        var browserOverride = Environment.GetEnvironmentVariable("PROCESSVAULT_BROWSER_OVERRIDE");
+        if (!string.IsNullOrWhiteSpace(browserOverride))
+            await browser.LaunchWebsiteWithBrowserAsync("https://example.org", browserOverride);
+        else
+            await browser.LaunchWebsiteAsync("https://example.org");
+        var smokeSeconds = int.TryParse(Environment.GetEnvironmentVariable("PROCESSVAULT_BROWSER_SMOKE_SECONDS"), out var requestedSeconds) ? Math.Clamp(requestedSeconds, 10, 60) : 60;
+        var visibilityDeadline = DateTimeOffset.UtcNow.AddSeconds(Math.Min(smokeSeconds, 20));
+        var pageVisible = false;
+        while (DateTimeOffset.UtcNow < visibilityDeadline && !pageVisible)
+        {
+            pageVisible = BrowserWindowProbe.HasVisibleTitle("Example Domain", browser.GetJobProcessIds());
+            if (!pageVisible) await Task.Delay(250);
+        }
+        Check(pageVisible, $"{browser.WebsiteBrowserName} visibly displays the requested website in a browser window");
+        Check(browser.HasSandboxedBrowserChild(), $"{browser.WebsiteBrowserName} starts a native low-integrity or AppContainer renderer process");
+        if (pageVisible)
+        {
+            var usableUntil = DateTimeOffset.UtcNow.AddSeconds(smokeSeconds);
+            while (DateTimeOffset.UtcNow < usableUntil && browser.IsRunning)
+                await Task.Delay(250);
+        }
+        if (!browser.IsRunning)
+            Console.Error.WriteLine($"Browser exited during usability check: {browser.ToReport().State}; events: {string.Join(" | ", browser.ToReport().Events.Select(e => e.Message))}");
+        Check(browser.IsRunning, $"{browser.WebsiteBrowserName} session process tree stays active for {smokeSeconds} seconds");
         browser.Stop();
         await Task.Delay(500);
-        Check(!browser.IsRunning, "website process tree stops with its AppContainer session");
+        Check(!browser.IsRunning, "website process tree stops when the browser session is stopped");
+        Check(!browser.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "temporary website profile cleans up after stop");
     }
 }
 
 if (failures.Count != 0) { Console.Error.WriteLine($"{failures.Count} test(s) failed."); return 1; }
 Console.WriteLine("All ProcessVault tests passed.");
 return 0;
+
+static class BrowserWindowProbe
+{
+    public static bool HasVisibleTitle(string text, IReadOnlyCollection<int> processIds)
+    {
+        var found = false;
+        EnumWindows((window, _) =>
+        {
+            if (!IsWindowVisible(window)) return true;
+            GetWindowThreadProcessId(window, out var processId);
+            if (!processIds.Contains((int)processId)) return true;
+            var length = GetWindowTextLength(window);
+            if (length <= 0) return true;
+            var title = new StringBuilder(length + 1);
+            _ = GetWindowText(window, title, title.Capacity);
+            if (title.ToString().Contains(text, StringComparison.OrdinalIgnoreCase))
+            {
+                found = true;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern int GetWindowTextLength(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int maximum);
+}
