@@ -7,6 +7,13 @@ if (args.Contains("--pv-appcontainer-probe", StringComparer.Ordinal)) return 0;
 var failures = new List<string>();
 void Check(bool condition, string name) { if (condition) Console.WriteLine($"PASS {name}"); else { failures.Add(name); Console.WriteLine($"FAIL {name}"); } }
 void Throws<T>(Action action, string name) where T : Exception { try { action(); failures.Add(name); Console.WriteLine($"FAIL {name}"); } catch (T) { Console.WriteLine($"PASS {name}"); } }
+HashSet<string> ExistingProfiles()
+{
+    var packages = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Packages");
+    return Directory.Exists(packages)
+        ? Directory.EnumerateDirectories(packages, "ProcessVault-*").ToHashSet(StringComparer.OrdinalIgnoreCase)
+        : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+}
 
 Check(LaunchValidation.ValidateWebAddress("https://example.org/path").Host == "example.org", "accepts https address");
 Check(LaunchValidation.ValidateWebAddress("http://localhost:8080").Port == 8080, "accepts local http test service");
@@ -31,12 +38,14 @@ Check(AppContainerRunner.QuoteArgument("two words") == "\"two words\"", "AppCont
 if (OperatingSystem.IsWindows())
 {
     using var runner = new AppContainerRunner();
+    var profilesBefore = ExistingProfiles();
     var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     runner.StateChanged += () => { if (runner.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) finished.TrySetResult(true); };
     await runner.LaunchProgramAsync(Environment.ProcessPath!, "--pv-appcontainer-probe");
     await finished.Task.WaitAsync(TimeSpan.FromSeconds(15));
     Check(runner.ToReport().Events.Any(e => e.Type == "exit"), "harmless program starts and exits under AppContainer");
     Check(!runner.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "temporary AppContainer profile is cleaned up");
+    Check(!ExistingProfiles().Except(profilesBefore, StringComparer.OrdinalIgnoreCase).Any(), "harmless program leaves no temporary profile files");
 
     var repository = new DirectoryInfo(AppContext.BaseDirectory);
     while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "ProcessVault.sln"))) repository = repository.Parent;
@@ -45,6 +54,7 @@ if (OperatingSystem.IsWindows())
         var fixture = Path.Combine(repository.FullName, "fixtures", "HarmlessProbe", "bin", "Debug", "net8.0", "HarmlessProbe.exe");
         if (File.Exists(fixture))
         {
+            profilesBefore = ExistingProfiles();
             using var harmless = new AppContainerRunner();
             var harmlessDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             harmless.StateChanged += () => { if (harmless.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) harmlessDone.TrySetResult(true); };
@@ -52,7 +62,9 @@ if (OperatingSystem.IsWindows())
             await harmlessDone.Task.WaitAsync(TimeSpan.FromSeconds(20));
             Check(harmless.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "harmless fixture can write to its AppContainer profile and run a child");
             Check(!harmless.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "fixture AppContainer profile is removed after exit");
+            Check(!ExistingProfiles().Except(profilesBefore, StringComparer.OrdinalIgnoreCase).Any(), "fixture leaves no temporary profile files");
 
+            profilesBefore = ExistingProfiles();
             using var networkProbe = new AppContainerRunner();
             var probeDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             networkProbe.StateChanged += () => { if (networkProbe.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) probeDone.TrySetResult(true); };
@@ -61,12 +73,14 @@ if (OperatingSystem.IsWindows())
             Check(networkProbe.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "internetClient AppContainer can fetch https://example.org");
             Check(networkProbe.ToReport().Events.Any(e => e.Type == "isolation" && e.Message.Contains("internetClient", StringComparison.Ordinal)), "network probe receives internetClient capability");
             Check(!networkProbe.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "network probe AppContainer profile is removed after exit");
+            Check(!ExistingProfiles().Except(profilesBefore, StringComparer.OrdinalIgnoreCase).Any(), "network probe leaves no temporary profile files");
 
             var hostFile = Path.Combine(Path.GetTempPath(), $"processvault-host-probe-{Guid.NewGuid():N}.txt");
             const string hostContents = "host file must remain unchanged";
             await File.WriteAllTextAsync(hostFile, hostContents);
             try
             {
+                profilesBefore = ExistingProfiles();
                 using var hostProbe = new AppContainerRunner();
                 var hostProbeDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 hostProbe.StateChanged += () => { if (hostProbe.ToReport().State.StartsWith("Exited", StringComparison.Ordinal)) hostProbeDone.TrySetResult(true); };
@@ -75,6 +89,7 @@ if (OperatingSystem.IsWindows())
                 Check(hostProbe.ToReport().State.StartsWith("Exited (code 0)", StringComparison.Ordinal), "AppContainer cannot read or write a host temp file");
                 Check(await File.ReadAllTextAsync(hostFile) == hostContents, "host file remains unchanged after the isolation probe");
                 Check(!hostProbe.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "host access probe AppContainer profile is removed after exit");
+                Check(!ExistingProfiles().Except(profilesBefore, StringComparer.OrdinalIgnoreCase).Any(), "host access probe leaves no temporary profile files");
             }
             finally { File.Delete(hostFile); }
         }
@@ -82,6 +97,7 @@ if (OperatingSystem.IsWindows())
 
     if (Environment.GetEnvironmentVariable("PROCESSVAULT_BROWSER_SMOKE") == "1")
     {
+        var browserProfilesBefore = ExistingProfiles();
         using var browser = new AppContainerRunner();
         var browserOverride = Environment.GetEnvironmentVariable("PROCESSVAULT_BROWSER_OVERRIDE");
         if (!string.IsNullOrWhiteSpace(browserOverride))
@@ -110,7 +126,12 @@ if (OperatingSystem.IsWindows())
         browser.Stop();
         await Task.Delay(500);
         Check(!browser.IsRunning, "website process tree stops when the browser session is stopped");
-        Check(!browser.ToReport().Events.Any(e => e.Type == "cleanup-warning"), "temporary website profile cleans up after stop");
+        var browserCleanupWarnings = browser.ToReport().Events.Where(e => e.Type == "cleanup-warning").Select(e => e.Message).ToArray();
+        foreach (var warning in browserCleanupWarnings) Console.Error.WriteLine($"Browser cleanup warning: {warning}");
+        Check(browserCleanupWarnings.Length == 0, "temporary website profile cleans up after stop");
+        var remainingBrowserProfiles = ExistingProfiles().Except(browserProfilesBefore, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (remainingBrowserProfiles.Length > 0) Console.Error.WriteLine($"Temporary profile folders remain: {string.Join(", ", remainingBrowserProfiles)}");
+        Check(remainingBrowserProfiles.Length == 0, "website session leaves no temporary profile files");
     }
 }
 

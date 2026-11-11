@@ -26,6 +26,7 @@ public sealed class AppContainerRunner : IDisposable
     private bool _jobTreeStopped;
     private bool _sessionCompleted;
     private string? _profileName;
+    private string? _profilePath;
     private string _state = "Ready";
     private string _kind = "Program";
     private string _targetName = "";
@@ -128,6 +129,7 @@ public sealed class AppContainerRunner : IDisposable
         _hash = null;
         var profile = CreateProfile(network && kind != "Website");
         _profileName = profile.Name;
+        _profilePath = profile.LocalDataPath;
         var work = Path.Combine(profile.LocalDataPath, "Work");
 
         try
@@ -190,12 +192,9 @@ public sealed class AppContainerRunner : IDisposable
         }
         catch
         {
-            var treeStopped = StopJobTree();
+            var treeStopped = _job is null || StopJobTree();
             if (treeStopped)
-            {
-                if (_profileName is not null) DeleteAppContainerProfile(_profileName);
-                _profileName = null;
-            }
+                CleanupProfile();
             else AddEvent("cleanup-warning", "Launch failed and the AppContainer process tree could not be confirmed stopped; temporary profile permissions were left in place for safety.");
             throw;
         }
@@ -286,15 +285,71 @@ public sealed class AppContainerRunner : IDisposable
 
     private void CleanupProfile()
     {
-        if (_profileName is null) return;
         var name = _profileName;
+        var path = _profilePath;
         _profileName = null;
+        _profilePath = null;
+        if (name is null) return;
         var hr = DeleteAppContainerProfile(name);
         if (hr < 0)
         {
             _state += " (temporary profile cleanup failed)";
-            AddEvent("cleanup-warning", $"AppContainer profile cleanup returned 0x{hr:X8}; after confirming the process tree has exited, check %LOCALAPPDATA%\\Packages for a ProcessVault-* folder.");
+            AddEvent("cleanup-warning", $"Windows could not unregister temporary AppContainer profile {name} (0x{hr:X8}).");
         }
+        try
+        {
+            if (path is not null) RemoveTemporaryProfileDirectory(name, path);
+        }
+        catch (Exception ex)
+        {
+            _state += " (temporary profile files remain)";
+            AddEvent("cleanup-warning", $"Could not remove temporary session files for {name}: {ex.Message}");
+        }
+    }
+
+    private static void RemoveTemporaryProfileDirectory(string name, string path)
+    {
+        const string prefix = "ProcessVault-";
+        if (!name.StartsWith(prefix, StringComparison.Ordinal) || !Guid.TryParseExact(name[prefix.Length..], "N", out _))
+            throw new InvalidOperationException("The generated profile name did not pass its format check.");
+
+        var packagesRoot = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Packages"));
+        var packageRoot = Path.GetFullPath(Path.Combine(packagesRoot, name));
+        var expectedProfilePath = Path.GetFullPath(Path.Combine(packageRoot, "AC"));
+        if (!string.Equals(Path.GetFullPath(path), expectedProfilePath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The temporary profile path is outside its expected Packages directory.");
+
+        if (Directory.Exists(expectedProfilePath)) DeleteDirectoryWithoutFollowingLinks(expectedProfilePath);
+        if (Directory.Exists(packageRoot) && !Directory.EnumerateFileSystemEntries(packageRoot).Any()) Directory.Delete(packageRoot);
+    }
+
+    private static void DeleteDirectoryWithoutFollowingLinks(string directory)
+    {
+        var attributes = File.GetAttributes(directory);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            Directory.Delete(directory, recursive: false);
+            return;
+        }
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            var entryAttributes = File.GetAttributes(entry);
+            var isDirectory = (entryAttributes & FileAttributes.Directory) != 0;
+            if ((entryAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                if (isDirectory) Directory.Delete(entry, recursive: false);
+                else File.Delete(entry);
+            }
+            else if (isDirectory)
+                DeleteDirectoryWithoutFollowingLinks(entry);
+            else
+            {
+                if ((entryAttributes & FileAttributes.ReadOnly) != 0) File.SetAttributes(entry, entryAttributes & ~FileAttributes.ReadOnly);
+                File.Delete(entry);
+            }
+        }
+        Directory.Delete(directory, recursive: false);
     }
 
     private bool StopJobTree()
